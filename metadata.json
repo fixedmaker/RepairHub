@@ -1,0 +1,10 @@
+{
+  "name": "RepairHub",
+  "description": "Digital repair management system for tracking items, technicians, and servicing progress.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
