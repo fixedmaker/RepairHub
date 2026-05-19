@@ -16,11 +16,23 @@ function getSupabase() {
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!supabaseUrl || !supabaseKey) {
-      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in secrets/environment variables.");
+      console.error("CRITICAL: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing!");
+      // We don't throw here to avoid crashing the whole server process immediately, 
+      // but the getSupabase() call will fail when used.
+      return null;
     }
     supabaseClient = createClient(supabaseUrl, supabaseKey);
+    console.log("Supabase Client initialized successfully");
   }
   return supabaseClient;
+}
+
+function ensureSupabase() {
+  const client = getSupabase();
+  if (!client) {
+    throw new Error("Supabase is not configured. Please add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your environment/secrets.");
+  }
+  return client;
 }
 
 // Request logging middleware
@@ -42,7 +54,7 @@ apiRouter.get("/health", (req, res) => {
 apiRouter.post("/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    const supabase = getSupabase();
+    const supabase = ensureSupabase();
     
     const { data: user, error } = await supabase
       .from("users")
@@ -58,6 +70,7 @@ apiRouter.post("/auth/login", async (req, res) => {
     const { password: _, ...userWithoutPassword } = user;
     res.json({ user: userWithoutPassword });
   } catch (err: any) {
+    console.error("Login Error:", err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -65,7 +78,7 @@ apiRouter.post("/auth/login", async (req, res) => {
 // Users
 apiRouter.get("/users", async (req, res) => {
   try {
-    const { data: users, error } = await getSupabase().from("users").select("*");
+    const { data: users, error } = await ensureSupabase().from("users").select("*");
     if (error) throw error;
     res.json(users.map(({ password: _, ...u }: any) => u));
   } catch (err: any) {
@@ -75,7 +88,7 @@ apiRouter.get("/users", async (req, res) => {
 
 apiRouter.post("/users", async (req, res) => {
   try {
-    const { data: user, error } = await getSupabase()
+    const { data: user, error } = await ensureSupabase()
       .from("users")
       .insert([req.body])
       .select()
@@ -89,7 +102,7 @@ apiRouter.post("/users", async (req, res) => {
 
 apiRouter.delete("/users/:id", async (req, res) => {
   try {
-    const { error } = await getSupabase().from("users").delete().eq("id", req.params.id);
+    const { error } = await ensureSupabase().from("users").delete().eq("id", req.params.id);
     if (error) throw error;
     res.json({ success: true });
   } catch (err: any) {
@@ -100,7 +113,7 @@ apiRouter.delete("/users/:id", async (req, res) => {
 // Customers
 apiRouter.get("/customers", async (req, res) => {
   try {
-    const { data: customers, error } = await getSupabase().from("customers").select("*");
+    const { data: customers, error } = await ensureSupabase().from("customers").select("*");
     if (error) throw error;
     res.json(customers);
   } catch (err: any) {
@@ -110,7 +123,7 @@ apiRouter.get("/customers", async (req, res) => {
 
 apiRouter.post("/customers", async (req, res) => {
   try {
-    const { data: customer, error } = await getSupabase()
+    const { data: customer, error } = await ensureSupabase()
       .from("customers")
       .insert([req.body])
       .select()
@@ -125,7 +138,7 @@ apiRouter.post("/customers", async (req, res) => {
 // Devices
 apiRouter.get("/devices", async (req, res) => {
   try {
-    const { data: devices, error } = await getSupabase().from("devices").select("*").order("entryDate", { ascending: false });
+    const { data: devices, error } = await ensureSupabase().from("devices").select("*").order("entryDate", { ascending: false });
     if (error) throw error;
     res.json(devices);
   } catch (err: any) {
@@ -142,7 +155,7 @@ apiRouter.post("/devices", async (req, res) => {
       status: "Menunggu",
       documentation: req.body.documentation || []
     };
-    const { data: device, error } = await getSupabase()
+    const { data: device, error } = await ensureSupabase()
       .from("devices")
       .insert([newDeviceData])
       .select()
@@ -156,7 +169,7 @@ apiRouter.post("/devices", async (req, res) => {
 
 apiRouter.patch("/devices/:id", async (req, res) => {
   try {
-    const supabase = getSupabase();
+    const supabase = ensureSupabase();
     const { data: currentDevice, error: fetchError } = await supabase
       .from("devices")
       .select("*")
@@ -196,7 +209,7 @@ apiRouter.patch("/devices/:id", async (req, res) => {
 // Logs
 apiRouter.get("/devices/:id/logs", async (req, res) => {
   try {
-    const { data: logs, error } = await getSupabase()
+    const { data: logs, error } = await ensureSupabase()
       .from("logs")
       .select("*")
       .eq("deviceId", req.params.id)
