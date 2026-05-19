@@ -63,16 +63,20 @@ async function startServer() {
   ];
 
   // --- API ROUTES ---
+  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
 
   // Auth
   app.post("/api/auth/login", (req, res) => {
     const { email, password } = req.body;
+    console.log(`Login attempt for: ${email}`);
     const user = users.find(u => u.email === email && u.password === password);
     if (user) {
+      console.log(`Login successful for: ${email}`);
       const { password, ...userWithoutPassword } = user;
       res.json({ user: userWithoutPassword });
     } else {
-      res.status(401).json({ message: "Invalid credentials" });
+      console.log(`Login failed for: ${email}`);
+      res.status(401).json({ message: "Email atau password salah." });
     }
   });
 
