@@ -1,13 +1,27 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(express.json());
+
+const isProduction = process.env.NODE_ENV === "production";
+
+// Lazy-initialized Supabase Client
+let supabaseClient: any = null;
+function getSupabase() {
+  if (!supabaseClient) {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in secrets/environment variables.");
+    }
+    supabaseClient = createClient(supabaseUrl, supabaseKey);
+  }
+  return supabaseClient;
+}
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -17,56 +31,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- MOCK DATABASE ---
-let users = [
-  { id: "1", name: "Admin User", email: "admin@repairhub.com", password: "admin123", role: "admin" },
-  { id: "2", name: "Tech John", email: "tech@repairhub.com", password: "tech123", role: "technician" }
-];
-
-let customers = [
-  { id: "c1", name: "Budi Santoso", phone: "08123456789", email: "budi@gmail.com", address: "Jakarta" },
-  { id: "c2", name: "Siti Aminah", phone: "08987654321", email: "siti@gmail.com", address: "Bandung" }
-];
-
-let devices = [
-  { 
-    id: "d1", 
-    customerId: "c1", 
-    customerName: "Budi Santoso",
-    type: "Laptop", 
-    brand: "Asus", 
-    model: "ROG Strix", 
-    serialNumber: "SN123456", 
-    damageDescription: "Mati total setelah kena air",
-    status: "Diproses", 
-    technicianId: "2",
-    technicianName: "Tech John",
-    entryDate: new Date(Date.now() - 86400000 * 2).toISOString(),
-    progress: 60,
-    serviceNotes: "Sedang menunggu sparepart IC Power",
-    documentation: []
-  },
-  { 
-    id: "d2", 
-    customerId: "c2", 
-    customerName: "Siti Aminah",
-    type: "Smartphone", 
-    brand: "Samsung", 
-    model: "S23 Ultra", 
-    serialNumber: "SN987654", 
-    damageDescription: "Layar pecah",
-    status: "Menunggu", 
-    entryDate: new Date(Date.now() - 3600000 * 5).toISOString(),
-    progress: 0,
-    serviceNotes: "",
-    documentation: []
-  }
-];
-
-let logs = [
-  { id: "l1", deviceId: "d1", technicianId: "2", status: "Diproses", note: "Unit dibongkar, ditemukan korosi pada IC Power", timestamp: new Date(Date.now() - 86400000).toISOString() }
-];
-
 const apiRouter = express.Router();
 
 // --- API ROUTES ---
@@ -75,80 +39,173 @@ apiRouter.get("/health", (req, res) => {
 });
 
 // Auth
-apiRouter.post("/auth/login", (req, res) => {
-  const { email, password } = req.body;
-  const user = users.find(u => u.email === email && u.password === password);
-  if (user) {
+apiRouter.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const supabase = getSupabase();
+    
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .eq("password", password)
+      .single();
+
+    if (error || !user) {
+      return res.status(401).json({ message: "Email atau password salah." });
+    }
+
     const { password: _, ...userWithoutPassword } = user;
     res.json({ user: userWithoutPassword });
-  } else {
-    res.status(401).json({ message: "Email atau password salah." });
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
   }
 });
 
 // Users
-apiRouter.get("/users", (req, res) => {
-  res.json(users.map(({ password: _, ...u }) => u));
+apiRouter.get("/users", async (req, res) => {
+  try {
+    const { data: users, error } = await getSupabase().from("users").select("*");
+    if (error) throw error;
+    res.json(users.map(({ password: _, ...u }: any) => u));
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
-apiRouter.post("/users", (req, res) => {
-  const newUser = { ...req.body, id: Math.random().toString(36).substr(2, 9) };
-  users.push(newUser);
-  res.json(newUser);
+apiRouter.post("/users", async (req, res) => {
+  try {
+    const { data: user, error } = await getSupabase()
+      .from("users")
+      .insert([req.body])
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(user);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
-apiRouter.delete("/users/:id", (req, res) => {
-  users = users.filter(u => u.id !== req.params.id);
-  res.json({ success: true });
+apiRouter.delete("/users/:id", async (req, res) => {
+  try {
+    const { error } = await getSupabase().from("users").delete().eq("id", req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // Customers
-apiRouter.get("/customers", (req, res) => res.json(customers));
-apiRouter.post("/customers", (req, res) => {
-  const newCustomer = { ...req.body, id: "c" + Math.random().toString(36).substr(2, 5) };
-  customers.push(newCustomer);
-  res.json(newCustomer);
+apiRouter.get("/customers", async (req, res) => {
+  try {
+    const { data: customers, error } = await getSupabase().from("customers").select("*");
+    if (error) throw error;
+    res.json(customers);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+apiRouter.post("/customers", async (req, res) => {
+  try {
+    const { data: customer, error } = await getSupabase()
+      .from("customers")
+      .insert([req.body])
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(customer);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // Devices
-apiRouter.get("/devices", (req, res) => res.json(devices));
-apiRouter.post("/devices", (req, res) => {
-  const newDevice = { 
-    ...req.body, 
-    id: "d" + Math.random().toString(36).substr(2, 5),
-    entryDate: new Date().toISOString(),
-    progress: 0,
-    status: "Menunggu"
-  };
-  devices.push(newDevice);
-  res.json(newDevice);
+apiRouter.get("/devices", async (req, res) => {
+  try {
+    const { data: devices, error } = await getSupabase().from("devices").select("*").order("entryDate", { ascending: false });
+    if (error) throw error;
+    res.json(devices);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
-apiRouter.patch("/devices/:id", (req, res) => {
-  const index = devices.findIndex(d => d.id === req.params.id);
-  if (index !== -1) {
-    devices[index] = { ...devices[index], ...req.body, updatedAt: new Date().toISOString() };
-    
+apiRouter.post("/devices", async (req, res) => {
+  try {
+    const newDeviceData = { 
+      ...req.body, 
+      entryDate: new Date().toISOString(),
+      progress: 0,
+      status: "Menunggu",
+      documentation: req.body.documentation || []
+    };
+    const { data: device, error } = await getSupabase()
+      .from("devices")
+      .insert([newDeviceData])
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(device);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+apiRouter.patch("/devices/:id", async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const { data: currentDevice, error: fetchError } = await supabase
+      .from("devices")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
+
+    if (fetchError || !currentDevice) {
+      return res.status(404).json({ message: "Device not found" });
+    }
+
+    const updateData = { ...req.body, updatedAt: new Date().toISOString() };
+    const { data: updatedDevice, error: updateError } = await supabase
+      .from("devices")
+      .update(updateData)
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
     if (req.body.status || req.body.serviceNotes) {
-      logs.push({
-        id: "l" + Math.random().toString(36).substr(2, 5),
+      await supabase.from("logs").insert([{
         deviceId: req.params.id,
-        technicianId: req.body.technicianId || devices[index].technicianId,
-        status: req.body.status || devices[index].status,
+        technicianId: req.body.technicianId || currentDevice.technicianId,
+        status: req.body.status || currentDevice.status,
         note: req.body.serviceNotes || "Status updated",
         timestamp: new Date().toISOString()
-      });
+      }]);
     }
     
-    res.json(devices[index]);
-  } else {
-    res.status(404).json({ message: "Device not found" });
+    res.json(updatedDevice);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
   }
 });
 
 // Logs
-apiRouter.get("/devices/:id/logs", (req, res) => {
-  res.json(logs.filter(l => l.deviceId === req.params.id));
+apiRouter.get("/devices/:id/logs", async (req, res) => {
+  try {
+    const { data: logs, error } = await getSupabase()
+      .from("logs")
+      .select("*")
+      .eq("deviceId", req.params.id)
+      .order("timestamp", { ascending: false });
+    if (error) throw error;
+    res.json(logs);
+  } catch (err: any) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 app.use("/api", apiRouter);
