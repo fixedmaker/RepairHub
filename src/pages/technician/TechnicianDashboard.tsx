@@ -12,13 +12,16 @@ import {
   X,
   Loader2,
   Save,
-  Calendar as CalendarIcon
+  Calendar as CalendarIcon,
+  History,
+  TrendingUp
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { Device, DeviceStatus } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
 import { cn } from '../../lib/utils';
 import { format, isWithinInterval, startOfDay, endOfDay, parseISO } from 'date-fns';
+import TechnicianScratchpad from '../../components/dashboard/TechnicianScratchpad';
 
 export default function TechnicianDashboard() {
   const [devices, setDevices] = useState<Device[]>([]);
@@ -27,6 +30,7 @@ export default function TechnicianDashboard() {
   const [showFilters, setShowFilters] = useState(false);
   
   // Filter States
+  const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -57,8 +61,28 @@ export default function TechnicianDashboard() {
     fetchData();
   }, [user]);
 
-  const filteredDevices = useMemo(() => {
+  // Reset status filter when shifting tabs to prevent cross-contamination
+  useEffect(() => {
+    setStatusFilter('');
+  }, [activeTab]);
+
+  const activeDevicesCount = useMemo(() => {
+    return devices.filter(d => d.status === 'Menunggu' || d.status === 'Diproses').length;
+  }, [devices]);
+
+  const historyDevicesCount = useMemo(() => {
+    return devices.filter(d => (d.status === 'Selesai' || d.status === 'Tidak Dapat Diperbaiki') && d.technicianId === user?.id).length;
+  }, [devices, user]);
+
+  const unassignedDevices = useMemo(() => {
+    return devices.filter(d => !d.technicianId && (d.status === 'Menunggu' || d.status === 'Diproses'));
+  }, [devices]);
+
+  const filteredActiveDevices = useMemo(() => {
     return devices.filter(device => {
+      const isStatusActive = device.status === 'Menunggu' || device.status === 'Diproses';
+      if (!isStatusActive) return false;
+
       const searchMatch = !searchQuery || 
         device.customerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
         device.brand.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -84,6 +108,46 @@ export default function TechnicianDashboard() {
     });
   }, [devices, searchQuery, statusFilter, startDate, endDate]);
 
+  const filteredHistoryDevices = useMemo(() => {
+    return devices.filter(device => {
+      const isHistoryStatus = device.status === 'Selesai' || device.status === 'Tidak Dapat Diperbaiki';
+      const isMyDevice = device.technicianId === user?.id;
+      if (!isHistoryStatus || !isMyDevice) return false;
+
+      const searchMatch = !searchQuery || 
+        device.customerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        device.brand.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        device.model.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        device.id.toLowerCase().includes(searchQuery.toLowerCase());
+
+      const statusMatch = !statusFilter || device.status === statusFilter;
+
+      let dateMatch = true;
+      if (startDate || endDate) {
+        try {
+          const entryDate = parseISO(device.entryDate);
+          dateMatch = isWithinInterval(entryDate, {
+            start: startDate ? startOfDay(parseISO(startDate)) : new Date(0),
+            end: endDate ? endOfDay(parseISO(endDate)) : new Date(8640000000000000)
+          });
+        } catch (e) {
+          dateMatch = true;
+        }
+      }
+
+      return searchMatch && statusMatch && dateMatch;
+    });
+  }, [devices, searchQuery, statusFilter, startDate, endDate, user]);
+
+  const historyStats = useMemo(() => {
+    const myHistory = devices.filter(d => (d.status === 'Selesai' || d.status === 'Tidak Dapat Diperbaiki') && d.technicianId === user?.id);
+    const success = myHistory.filter(d => d.status === 'Selesai').length;
+    const failed = myHistory.filter(d => d.status === 'Tidak Dapat Diperbaiki').length;
+    const total = success + failed;
+    const rate = total > 0 ? Math.round((success / total) * 100) : 0;
+    return { success, failed, total, rate };
+  }, [devices, user]);
+
   const openUpdateModal = (device: Device) => {
     setSelectedDevice(device);
     setUpdateData({
@@ -99,10 +163,12 @@ export default function TechnicianDashboard() {
 
     setUpdating(true);
     try {
+      const willBeHistory = updateData.status === 'Selesai' || updateData.status === 'Tidak Dapat Diperbaiki';
       await api.devices.update(selectedDevice.id, {
         ...updateData,
         technicianId: user?.id,
-        technicianName: user?.name
+        technicianName: user?.name,
+        ...(willBeHistory ? { exitDate: new Date().toISOString() } : { exitDate: null })
       });
       setSelectedDevice(null);
       await fetchData();
@@ -110,6 +176,21 @@ export default function TechnicianDashboard() {
       alert('Gagal mengupdate perbaikan');
     } finally {
       setUpdating(false);
+    }
+  };
+
+  const handleClaimDevice = async (device: Device) => {
+    try {
+      await api.devices.update(device.id, {
+        status: 'Diproses',
+        progress: 10,
+        technicianId: user?.id,
+        technicianName: user?.name,
+        serviceNotes: 'Klaim unit: Mulai pengerjaan oleh teknisi.'
+      });
+      await fetchData();
+    } catch (err) {
+      alert('Gagal mengambil alih unit perbaikan');
     }
   };
 
@@ -145,13 +226,96 @@ export default function TechnicianDashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
         {/* Left Column: Filter & Task List */}
         <div className="lg:col-span-3 space-y-6">
+          {/* Custom Tabs */}
+          <div className="flex border-b border-slate-200 bg-white px-6 pt-2 rounded-3xl border border-slate-100 shadow-sm">
+            <button
+              onClick={() => setActiveTab('active')}
+              className={cn(
+                "py-4 px-4 font-extrabold text-sm transition-all border-b-2 relative -mb-[1px]",
+                activeTab === 'active' 
+                  ? "border-red-500 text-slate-900" 
+                  : "border-transparent text-slate-400 hover:text-slate-600"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Wrench className="w-4 h-4" />
+                <span>Tugas Aktif & Antrean</span>
+                <span className={cn(
+                  "text-[10px] px-2 py-0.5 rounded-full font-extrabold",
+                  activeTab === 'active' ? "bg-red-50 text-red-600" : "bg-slate-100 text-slate-500"
+                )}>
+                  {activeDevicesCount}
+                </span>
+              </div>
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={cn(
+                "py-4 px-4 font-extrabold text-sm transition-all border-b-2 relative -mb-[1px]",
+                activeTab === 'history' 
+                  ? "border-red-500 text-slate-900" 
+                  : "border-transparent text-slate-400 hover:text-slate-600"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4" />
+                <span>Riwayat Perbaikan</span>
+                <span className={cn(
+                  "text-[10px] px-2 py-0.5 rounded-full font-extrabold",
+                  activeTab === 'history' ? "bg-green-50 text-green-600" : "bg-slate-100 text-slate-500"
+                )}>
+                  {historyDevicesCount}
+                </span>
+              </div>
+            </button>
+          </div>
+
+          {/* History Statistics Panel */}
+          {activeTab === 'history' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-emerald-50/50 border border-emerald-100/60 p-5 rounded-[2rem] flex items-center gap-4">
+                <div className="w-12 h-12 bg-emerald-500 rounded-2xl flex items-center justify-center shadow-md shadow-emerald-200">
+                  <CheckCircle2 className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Perbaikan Sukses</div>
+                  <div className="text-2xl font-black text-slate-800">{historyStats.success} <span className="text-xs text-slate-400 font-bold">unit</span></div>
+                </div>
+              </div>
+
+              <div className="bg-rose-50/50 border border-rose-100/60 p-5 rounded-[2rem] flex items-center gap-4">
+                <div className="w-12 h-12 bg-rose-500 rounded-2xl flex items-center justify-center shadow-md shadow-rose-200">
+                  <AlertCircle className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Perbaikan Gagal</div>
+                  <div className="text-2xl font-black text-slate-800">{historyStats.failed} <span className="text-xs text-slate-400 font-bold">unit</span></div>
+                </div>
+              </div>
+
+              <div className="bg-violet-50/40 border border-violet-100/50 p-5 rounded-[2rem] flex items-center gap-4">
+                <div className="w-12 h-12 bg-violet-500 rounded-2xl flex items-center justify-center shadow-md shadow-violet-200">
+                  <TrendingUp className="w-6 h-6 text-white" />
+                </div>
+                <div className="flex-1">
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Keberhasilan</div>
+                  <div className="text-2xl font-black text-slate-800 mb-1">{historyStats.rate}%</div>
+                  <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                    <div className="bg-violet-500 h-full transition-all" style={{ width: `${historyStats.rate}%` }}></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Search and Filters */}
           <div className="flex flex-col gap-4">
             <div className="flex items-center gap-4 bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
               <div className="relative flex-1">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                 <input 
                   type="text" 
-                  placeholder="Cari unit atau nama pelanggan..."
+                  placeholder={activeTab === 'active' ? "Cari unit aktif atau nama pelanggan..." : "Cari di arsip riwayat perbaikan..."}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full bg-slate-100 border-none rounded-xl py-2.5 pl-10 pr-4 text-sm focus:ring-2 focus:ring-red-500 transition-all outline-none"
@@ -185,10 +349,17 @@ export default function TechnicianDashboard() {
                         className="w-full bg-slate-50 border border-slate-100 rounded-xl py-2 px-3 text-sm outline-none focus:ring-2 focus:ring-red-500"
                       >
                         <option value="">Semua Status</option>
-                        <option value="Menunggu">Menunggu</option>
-                        <option value="Diproses">Diproses</option>
-                        <option value="Selesai">Selesai</option>
-                        <option value="Tidak Dapat Diperbaiki">Gagal</option>
+                        {activeTab === 'active' ? (
+                          <>
+                            <option value="Menunggu">Menunggu</option>
+                            <option value="Diproses">Diproses</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="Selesai">Selesai</option>
+                            <option value="Tidak Dapat Diperbaiki">Gagal / Tidak Dapat Diperbaiki</option>
+                          </>
+                        )}
                       </select>
                     </div>
                     <div className="space-y-1">
@@ -228,99 +399,162 @@ export default function TechnicianDashboard() {
             </AnimatePresence>
           </div>
 
+          {/* Cards Area Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {loading ? (
               <div className="col-span-2 h-40 flex items-center justify-center">
                 <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-red-500"></div>
               </div>
-            ) : filteredDevices.length === 0 ? (
-              <div className="col-span-2 bg-white rounded-[2rem] border border-dashed border-slate-200 p-12 text-center">
-                <ClipboardList className="w-12 h-12 text-slate-200 mx-auto mb-4" />
-                <p className="font-bold text-slate-400">Tidak ada tugas perbaikan yang sesuai filter.</p>
-              </div>
+            ) : activeTab === 'active' ? (
+              filteredActiveDevices.length === 0 ? (
+                <div className="col-span-2 bg-white rounded-[2rem] border border-dashed border-slate-200 p-12 text-center">
+                  <ClipboardList className="w-12 h-12 text-slate-200 mx-auto mb-4" />
+                  <p className="font-bold text-slate-400">Tidak ada tugas perbaikan aktif yang sesuai filter.</p>
+                </div>
+              ) : (
+                filteredActiveDevices.map((device) => (
+                  <motion.div 
+                    key={device.id}
+                    whileHover={{ y: -4 }}
+                    onClick={() => openUpdateModal(device)}
+                    className="bg-white rounded-[2rem] border border-slate-100 shadow-sm p-6 hover:shadow-md transition-all cursor-pointer overflow-hidden relative group"
+                  >
+                    <div className="flex items-start justify-between mb-4">
+                      <div className={cn(
+                        "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                        device.status === 'Diproses' ? "bg-blue-50 text-blue-600" :
+                        device.status === 'Selesai' ? "bg-green-50 text-green-600" :
+                        device.status === 'Menunggu' ? "bg-amber-50 text-amber-600" :
+                        "bg-red-50 text-red-600"
+                      )}>
+                        {device.status}
+                      </div>
+                      <span className="text-[10px] font-bold text-slate-400">{format(new Date(device.entryDate), 'dd MMM')}</span>
+                    </div>
+
+                    <h3 className="font-bold text-lg text-slate-900 mb-1">{device.brand} {device.model}</h3>
+                    <p className="text-xs text-slate-500 font-medium mb-6">{device.customerName} • {device.type}</p>
+
+                    <div className="space-y-4">
+                      {/* Progress Bar */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                          <span>Pengerjaan</span>
+                          <span>{device.progress}%</span>
+                        </div>
+                        <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                          <div 
+                            className={cn(
+                              "h-full transition-all duration-500",
+                              device.status === 'Selesai' ? "bg-green-500" : "bg-red-500"
+                            )}
+                            style={{ width: `${device.progress}%` }}
+                          ></div>
+                        </div>
+                      </div>
+
+                      <div className="pt-4 flex items-center justify-between border-t border-slate-50">
+                        <div className="flex -space-x-2">
+                          <div className="w-8 h-8 rounded-lg bg-slate-200 border-2 border-white"></div>
+                          <div className="w-8 h-8 rounded-lg bg-slate-300 border-2 border-white"></div>
+                        </div>
+                        <button className="flex items-center gap-1 text-xs font-bold text-slate-900 group-hover:text-red-500 transition-all">
+                          Update Status <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))
+              )
             ) : (
-              filteredDevices.map((device) => (
-                <motion.div 
-                  key={device.id}
-                  whileHover={{ y: -4 }}
-                  onClick={() => openUpdateModal(device)}
-                  className="bg-white rounded-[2rem] border border-slate-100 shadow-sm p-6 hover:shadow-md transition-all cursor-pointer overflow-hidden relative group"
-                >
-                  <div className="flex items-start justify-between mb-4">
-                    <div className={cn(
-                      "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
-                      device.status === 'Diproses' ? "bg-blue-50 text-blue-600" :
-                      device.status === 'Selesai' ? "bg-green-50 text-green-600" :
-                      device.status === 'Menunggu' ? "bg-amber-50 text-amber-600" :
-                      "bg-red-50 text-red-600"
-                    )}>
-                      {device.status}
-                    </div>
-                    <span className="text-[10px] font-bold text-slate-400">{format(new Date(device.entryDate), 'dd MMM')}</span>
-                  </div>
-
-                  <h3 className="font-bold text-lg text-slate-900 mb-1">{device.brand} {device.model}</h3>
-                  <p className="text-xs text-slate-500 font-medium mb-6">{device.customerName} • {device.type}</p>
-
-                  <div className="space-y-4">
-                    {/* Progress Bar */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                        <span>Pengerjaan</span>
-                        <span>{device.progress}%</span>
+              // Riwayat Perbaikan (History) section cards
+              filteredHistoryDevices.length === 0 ? (
+                <div className="col-span-2 bg-white rounded-[2rem] border border-dashed border-slate-200 p-12 text-center animate-fade-in">
+                  <History className="w-12 h-12 text-slate-200 mx-auto mb-4" />
+                  <p className="font-bold text-slate-400">Belum ada riwayat perbaikan selesai atau gagal yang sesuai filter.</p>
+                </div>
+              ) : (
+                filteredHistoryDevices.map((device) => (
+                  <motion.div 
+                    key={device.id}
+                    whileHover={{ y: -4 }}
+                    onClick={() => openUpdateModal(device)}
+                    className="bg-white rounded-[2rem] border border-slate-100 shadow-sm p-6 hover:shadow-md transition-all cursor-pointer overflow-hidden relative group"
+                  >
+                    <div className="flex items-start justify-between mb-4">
+                      <div className={cn(
+                        "flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                        device.status === 'Selesai' 
+                          ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
+                          : "bg-rose-50 text-rose-700 border border-rose-100"
+                      )}>
+                        {device.status === 'Selesai' ? (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                            <span>Selesai</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                            <span>Gagal</span>
+                          </>
+                        )}
                       </div>
-                      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div 
-                          className={cn(
-                            "h-full transition-all duration-500",
-                            device.status === 'Selesai' ? "bg-green-500" : "bg-red-500"
-                          )}
-                          style={{ width: `${device.progress}%` }}
-                        ></div>
-                      </div>
+                      <span className="text-[10px] font-bold text-slate-400">
+                        {device.exitDate ? format(new Date(device.exitDate), 'dd MMM yyyy') : format(new Date(device.entryDate), 'dd MMM')}
+                      </span>
                     </div>
 
-                    <div className="pt-4 flex items-center justify-between border-t border-slate-50">
-                      <div className="flex -space-x-2">
-                        <div className="w-8 h-8 rounded-lg bg-slate-200 border-2 border-white"></div>
-                        <div className="w-8 h-8 rounded-lg bg-slate-300 border-2 border-white"></div>
-                      </div>
+                    <h3 className="font-bold text-lg text-slate-900 mb-1">{device.brand} {device.model}</h3>
+                    <p className="text-xs text-slate-500 font-medium mb-4">{device.customerName} • {device.type}</p>
+
+                    <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-100/50">
+                      <div className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Catatan Akhir Servis</div>
+                      <p className="text-xs text-slate-600 line-clamp-3 leading-relaxed font-sans whitespace-pre-wrap">
+                        {device.serviceNotes || "Tidak ada catatan servis tertulis."}
+                      </p>
+                    </div>
+
+                    <div className="pt-4 mt-2 flex items-center justify-between border-t border-slate-50">
+                      <span className="text-[10px] font-mono font-bold text-slate-400">ID: {device.id}</span>
                       <button className="flex items-center gap-1 text-xs font-bold text-slate-900 group-hover:text-red-500 transition-all">
-                        Update Status <ChevronRight className="w-4 h-4" />
+                        Edit & Detail <ChevronRight className="w-4 h-4" />
                       </button>
                     </div>
-                  </div>
-                </motion.div>
-              ))
+                  </motion.div>
+                ))
+              )
             )}
           </div>
         </div>
 
         {/* Right Column */}
-        <div className="space-y-8">
+        <div className="space-y-6">
+          {/* Ringkasan Tugas Saya */}
           <div className="bg-white rounded-[2rem] border border-slate-100 shadow-sm p-6">
-            <h3 className="font-bold text-slate-900 mb-6 flex items-center gap-2">
-              <Clock className="w-5 h-5 text-red-500" /> Aktifitas Terakhir
+            <h3 className="font-bold text-slate-900 mb-4 flex items-center gap-2">
+              <Wrench className="w-5 h-5 text-red-500" /> Ringkasan Kerja Saya
             </h3>
-            <div className="space-y-6 relative before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-[2px] before:bg-slate-100">
-              {[
-                { time: '09:30', desc: 'Hardware check Asus ROG', type: 'check' },
-                { time: 'Yesterday', desc: 'Selesai perbaikan iPhone 13', type: 'finish' },
-                { time: '2 Days ago', desc: 'Menambahkan catatan MacBook Air', type: 'note' },
-              ].map((log, i) => (
-                <div key={i} className="flex gap-4 relative z-10">
-                  <div className="w-6 h-6 rounded-full border-4 border-slate-50 bg-red-500 shadow-sm"></div>
-                  <div>
-                    <p className="text-[10px] text-slate-400 font-bold uppercase">{log.time}</p>
-                    <p className="text-sm font-medium text-slate-700 leading-tight">{log.desc}</p>
-                  </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-blue-50/40 p-4 rounded-2xl border border-blue-100/50 text-left">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Diproses</span>
+                <div className="text-2xl font-black text-blue-600 mt-1">
+                  {devices.filter(d => d.status === 'Diproses' && d.technicianId === user?.id).length}
+                  <span className="text-xs text-slate-400 font-bold font-sans ml-1">unit</span>
                 </div>
-              ))}
+              </div>
+              <div className="bg-amber-50/40 p-4 rounded-2xl border border-amber-100/50 text-left">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Antre</span>
+                <div className="text-2xl font-black text-amber-500 mt-1">
+                  {devices.filter(d => d.status === 'Menunggu' && d.technicianId === user?.id).length}
+                  <span className="text-xs text-slate-400 font-bold font-sans ml-1">unit</span>
+                </div>
+              </div>
             </div>
-            <button className="w-full mt-8 py-3 bg-slate-100 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200 transition-all">
-              Semua Riwayat
-            </button>
           </div>
+
+          {/* Buku Catatan & Memo Teknisi (Interactive Scratchpad) */}
+          <TechnicianScratchpad userId={user?.id} />
 
           <div className="bg-slate-900 p-6 rounded-[2rem] text-white">
             <div className="flex items-center gap-3 mb-4">

@@ -60,5 +60,15 @@ export const api = {
       body: JSON.stringify(data),
     }),
     getLogs: (id: string) => request<RepairLog[]>(`/devices/${id}/logs`),
+    upload: (name: string, type: string, base64: string) => request<{ url: string; name: string }>('/upload', {
+      method: 'POST',
+      body: JSON.stringify({ name, type, base64 }),
+    }),
+  },
+  supportRequests: {
+    create: (data: any) => request<any>('/support-requests', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   },
 };

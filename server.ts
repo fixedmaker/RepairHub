@@ -1,10 +1,20 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+// Ensure uploads folder exists
+const uploadsDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+app.use("/uploads", express.static(uploadsDir));
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -206,6 +216,29 @@ apiRouter.patch("/devices/:id", async (req, res) => {
   }
 });
 
+// File Upload Endpoint
+apiRouter.post("/upload", async (req, res) => {
+  try {
+    const { name, type, base64 } = req.body;
+    if (!name || !base64) {
+      return res.status(400).json({ message: "Nama file dan data base64 wajib diisi" });
+    }
+
+    const base64Data = base64.replace(/^data:.*?;base64,/, "");
+    const fileExt = path.extname(name) || (type === "application/pdf" ? ".pdf" : ".png");
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}${fileExt}`;
+    const filePath = path.join(uploadsDir, uniqueName);
+
+    fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+
+    const fileUrl = `/uploads/${uniqueName}`;
+    res.json({ url: fileUrl, name: name });
+  } catch (err: any) {
+    console.error("Upload error:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Logs
 apiRouter.get("/devices/:id/logs", async (req, res) => {
   try {
@@ -218,6 +251,54 @@ apiRouter.get("/devices/:id/logs", async (req, res) => {
     res.json(logs);
   } catch (err: any) {
     res.status(500).json({ message: err.message });
+  }
+});
+
+// Support / Contact Requests
+apiRouter.post("/support-requests", async (req, res) => {
+  try {
+    const { name, email, phone, category, message } = req.body;
+    const supabase = getSupabase(); // Use getSupabase() directly so it doesn't throw immediate exceptions if unconfigured
+    
+    if (!supabase) {
+      console.warn("Supabase is not configured. Falling back to local/client response.");
+      return res.json({ 
+        success: true, 
+        fallback: true, 
+        message: "Supabase belum terkonfigurasi. Silakan lanjutkan pesan Anda ke WhatsApp Admin." 
+      });
+    }
+
+    // Attempting to insert into support_requests table
+    const { data, error } = await supabase
+      .from("support_requests")
+      .insert([{
+        name,
+        email,
+        phone,
+        category,
+        message,
+        created_at: new Date().toISOString()
+      }])
+      .select();
+
+    if (error) {
+      console.warn("Could not insert support request to Supabase table (this is normal if you haven't created the 'support_requests' table yet):", error.message);
+      return res.json({ 
+        success: true, 
+        fallback: true,
+        message: "Permintaan diterima. Silakan hubungi WhatsApp Admin untuk respons cepat!" 
+      });
+    }
+
+    res.json({ success: true, data });
+  } catch (err: any) {
+    console.error("Support API Error:", err);
+    res.json({ 
+      success: true, 
+      fallback: true,
+      message: "Permintaan diterima. Hubungi admin via WhatsApp untuk respons cepat!" 
+    });
   }
 });
 
