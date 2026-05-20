@@ -10,11 +10,18 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Ensure uploads folder exists
 const uploadsDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+} catch (err) {
+  console.warn("Could not create local uploads folder (normal in read-only environments like Vercel):", err);
 }
 
 app.use("/uploads", express.static(uploadsDir));
+if (process.env.VERCEL) {
+  app.use("/uploads", express.static("/tmp"));
+}
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -227,7 +234,10 @@ apiRouter.post("/upload", async (req, res) => {
     const base64Data = base64.replace(/^data:.*?;base64,/, "");
     const fileExt = path.extname(name) || (type === "application/pdf" ? ".pdf" : ".png");
     const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}${fileExt}`;
-    const filePath = path.join(uploadsDir, uniqueName);
+    
+    // Use /tmp for serverless Vercel, which is writable
+    const targetDir = process.env.VERCEL ? "/tmp" : uploadsDir;
+    const filePath = path.join(targetDir, uniqueName);
 
     fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
 
