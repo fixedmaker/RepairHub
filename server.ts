@@ -28,17 +28,21 @@ const isProduction = process.env.NODE_ENV === "production";
 let supabaseClient: any = null;
 function getSupabase() {
   if (!supabaseClient) {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
+    const supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
 
-    if (!supabaseUrl || !supabaseKey) {
-      console.error("CRITICAL: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing!");
-      // We don't throw here to avoid crashing the whole server process immediately, 
-      // but the getSupabase() call will fail when used.
+    if (!supabaseUrl || !supabaseKey || supabaseUrl.startsWith("your_") || supabaseKey.startsWith("your_")) {
+      console.warn("CRITICAL WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing, empty, or unconfigured!");
       return null;
     }
-    supabaseClient = createClient(supabaseUrl, supabaseKey);
-    console.log("Supabase Client initialized successfully");
+    
+    try {
+      supabaseClient = createClient(supabaseUrl, supabaseKey);
+      console.log("Supabase Client initialized successfully with url:", supabaseUrl);
+    } catch (err: any) {
+      console.error("Failed to initialize Supabase client safely:", err.message);
+      return null;
+    }
   }
   return supabaseClient;
 }
@@ -46,7 +50,7 @@ function getSupabase() {
 function ensureSupabase() {
   const client = getSupabase();
   if (!client) {
-    throw new Error("Supabase is not configured. Please add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your environment/secrets.");
+    throw new Error("Supabase is not configured yet. Using mock/resilient fallback database modes.");
   }
   return client;
 }
@@ -153,7 +157,7 @@ apiRouter.get("/health", (req, res) => {
 // Auth
 apiRouter.post("/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
     const normalizedEmail = String(email || "").trim().toLowerCase();
     const cleanPassword = String(password || "").trim();
 
@@ -633,6 +637,16 @@ apiRouter.post("/support-requests", async (req, res) => {
 });
 
 app.use("/api", apiRouter);
+app.use("/", apiRouter);
+
+// Global Error Handler to catch any runtime route exceptions and return beautiful JSON diagnoses rather than raw generic 500 pages
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("GLOBAL APP ERROR:", err);
+  res.status(500).json({
+    message: err?.message || "Umpan balik server tidak diketahui (Internal Server Error).",
+    error: process.env.NODE_ENV !== "production" ? err?.stack : undefined
+  });
+});
 
 async function startServer() {
   try {
