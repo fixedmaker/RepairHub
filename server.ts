@@ -1,7 +1,57 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
 import { createClient } from "@supabase/supabase-js";
+
+// Capturing systems console logs to in-memory buffer for diagnostic capability
+const systemLogs: string[] = [];
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+function safeStringify(val: any): string {
+  try {
+    if (val === null) return "null";
+    if (val === undefined) return "undefined";
+    if (val instanceof Error) {
+      return `${val.name}: ${val.message}\n${val.stack || ""}`;
+    }
+    if (typeof val === "object") {
+      const seen = new WeakSet();
+      return JSON.stringify(val, (key, value) => {
+        if (typeof value === "object" && value !== null) {
+          if (seen.has(value)) {
+            return "[Circular]";
+          }
+          seen.add(value);
+        }
+        return value;
+      });
+    }
+    return String(val);
+  } catch (e) {
+    return `[Unstringifiable: ${typeof val}]`;
+  }
+}
+
+console.log = (...args) => {
+  systemLogs.push(`[LOG] ${args.map(safeStringify).join(' ')}`);
+  if (systemLogs.length > 300) systemLogs.shift();
+  originalLog(...args);
+};
+
+console.error = (...args) => {
+  systemLogs.push(`[ERROR] ${args.map(safeStringify).join(' ')}`);
+  if (systemLogs.length > 300) systemLogs.shift();
+  originalError(...args);
+};
+
+console.warn = (...args) => {
+  systemLogs.push(`[WARN] ${args.map(safeStringify).join(' ')}`);
+  if (systemLogs.length > 300) systemLogs.shift();
+  originalWarn(...args);
+};
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
@@ -28,17 +78,44 @@ const isProduction = process.env.NODE_ENV === "production";
 let supabaseClient: any = null;
 function getSupabase() {
   if (!supabaseClient) {
-    const supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
-    const supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+    let supabaseUrl = String(process.env.SUPABASE_URL || "").trim();
+    
+    // Look up any env var starting with SUPABASE_SERVICE_ or matching typical names due to length truncations in UI
+    let supabaseKey = "";
+    const envKeys = Object.keys(process.env);
+    
+    const matchKey = envKeys.find(k => 
+      k.startsWith("SUPABASE_SERVICE_") || 
+      k === "SUPABASE_SERVICE_ROLE_KEY" || 
+      k === "SUPABASE_KEY" || 
+      k === "SUPABASE_ANON_KEY"
+    );
+    
+    if (matchKey) {
+      supabaseKey = String(process.env[matchKey] || "").trim();
+      console.log(`Supabase key detected from environment variable '${matchKey}'`);
+    } else {
+      supabaseKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+    }
 
-    if (!supabaseUrl || !supabaseKey || supabaseUrl.startsWith("your_") || supabaseKey.startsWith("your_")) {
-      console.warn("CRITICAL WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing, empty, or unconfigured!");
+    if (!supabaseUrl || !supabaseKey || supabaseUrl.startsWith("your_") || supabaseKey.startsWith("your_") || supabaseUrl.toUpperCase().startsWith("YOUR_")) {
+      console.warn("CRITICAL WARNING: SUPABASE_URL or SUPABASE_KEY is missing, empty, or unconfigured!");
       return null;
+    }
+    
+    // Validate scheme to avoid throwing TypeError in createClient
+    if (!supabaseUrl.startsWith("http://") && !supabaseUrl.startsWith("https://")) {
+      console.warn("Invalid SUPABASE_URL format. Must start with http or https. Got:", supabaseUrl);
+      if (supabaseUrl.includes(".co") || supabaseUrl.includes(".com") || supabaseUrl.includes(".net")) {
+        supabaseUrl = "https://" + supabaseUrl;
+      } else {
+        return null;
+      }
     }
     
     try {
       supabaseClient = createClient(supabaseUrl, supabaseKey);
-      console.log("Supabase Client initialized successfully with url:", supabaseUrl);
+      console.log("Supabase Client initialized successfully with URL:", supabaseUrl);
     } catch (err: any) {
       console.error("Failed to initialize Supabase client safely:", err.message);
       return null;
@@ -152,6 +229,19 @@ function isDatabaseError(err: any): boolean {
 // --- API ROUTES ---
 apiRouter.get("/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+apiRouter.get("/diagnose", (req, res) => {
+  const envKeys = Object.keys(process.env);
+  res.json({
+    status: "ok",
+    node_env: process.env.NODE_ENV,
+    vercel: process.env.VERCEL,
+    supabase_url_exists: !!process.env.SUPABASE_URL,
+    supabase_url: process.env.SUPABASE_URL ? (process.env.SUPABASE_URL.length > 20 ? process.env.SUPABASE_URL.substring(0, 20) + "..." : process.env.SUPABASE_URL) : undefined,
+    supabase_keys_detected: envKeys.filter(k => k.toUpperCase().includes("SUPABASE")),
+    logs: systemLogs
+  });
 });
 
 // Auth
@@ -675,8 +765,8 @@ async function startServer() {
   }
 }
 
-// Only start the server if not being imported (Vercel imports it)
-if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+// Only start the server if not being imported (Vercel imports it as a serverless function)
+if (!process.env.VERCEL) {
   startServer();
 }
 
